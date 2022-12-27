@@ -18,13 +18,27 @@ class Map
       @valves[name] = valve
     end
     edges.each do |edge_name|
-      edge = @valves[edge_name]
-      if edge.nil?
-        edge = @valves[edge_name] = Valve.new(edge_name)
+      edge_valve = @valves[edge_name]
+      if edge_valve.nil?
+        edge_valve = @valves[edge_name] = Valve.new(edge_name)
       end
-      valve.edges[edge_name] = edge
+      valve.edges[edge_name] = {valve: edge_valve, cost: 1}
     end
     valve
+  end
+
+  #TODO THIS IS TOSSING OUT THE EDGE FROM BB -> JJ, WHICH IS CHANGING THE TOPOLOGY AND THAT'S NOT GOOD
+  def coalesce_zero_edges
+    zero_valves = @valves.values.select{|v| v.flow.zero?}
+    zero_valves.each do |zero_v|
+      zero_v.edges.each do |k, v|
+        valve = v[:valve]
+        cost = v[:cost]
+        other_edges = zero_v.edges.reject {|name, h| h[:valve].name == valve.name}
+
+        valve.replace_edge(zero_v, other_edges)
+      end
+    end
   end
 end
 
@@ -34,6 +48,22 @@ class Valve
     self.name = name
     self.flow = flow
     self.edges = {}
+  end
+
+  def replace_edge(edge, new_edges)
+    deleted_edge = @edges.delete(edge.name)
+    return if deleted_edge.nil?
+
+    edge_cost = deleted_edge[:cost]
+    new_edges.each do |k, v|
+      puts k
+      new_valve = v[:valve]
+      new_edge_cost = v[:cost] + edge_cost
+      next if !edges[k].nil? && edges[k][:cost] <= new_edge_cost
+      edges[new_valve.name] = {valve: new_valve, cost: new_edge_cost}
+      new_valve.edges.delete(edge.name)
+      new_valve.edges[self.name] = {valve: self, cost: new_edge_cost}
+    end
   end
 end
 
@@ -68,10 +98,9 @@ class TravelState
   end
 
   def avail_edges
-    sorted = self.current_valve.edges.values.sort{|v1, v2| v2.flow <=> v1.flow}
-    new_edges = sorted.reject {|edge| self.traveled_valve.include? edge }
-    all_edges = sorted - new_edges
-    new_edges + all_edges
+    reachable = self.current_valve.edges.values.select{|h| h[:cost] <= remaining_time }
+    reachable.sort{|v1, v2| v2[:valve].flow <=> v1[:valve].flow}
+                      .sort_by{|edge| self.traveled_valve.include? edge[:valve] ? 0 : 1 }
   end
 
   def open_valve
@@ -86,14 +115,16 @@ class TravelState
   end
 
   def travel_edge(edge)
+    edge_valve = edge[:valve]
+    edge_cost = edge[:cost]
     new_state = self.clone
     new_state.total_flow_amount = self.total_flow_amount + self.total_flow_rate
-    new_state.time_elapsed = self.time_elapsed + 1
-    new_state.current_valve = edge
+    new_state.time_elapsed = self.time_elapsed + edge_cost
+    new_state.current_valve = edge_valve
     new_state.traveled_valve = @traveled_valve.clone
-    new_state.traveled_valve << edge
+    new_state.traveled_valve << edge_valve
     new_state.history = @history.clone
-    new_state.history << edge
+    new_state.history << edge_valve
     new_state
   end
 
@@ -133,21 +164,28 @@ class TravelState
       new_state_open.print_state
       best_state = new_state_open.spider
     end
-    avail_edges.each {|e|
-      if @current_valve.name == "AA"
-        puts "check A" if PRINT_ENABLED
-      end
-      puts "from #{@current_valve.name} travel edge #{e.name}" if PRINT_ENABLED
-      new_map = travel_edge(e)
-      new_state = new_map.spider
-      puts "spider state:" if PRINT_ENABLED
-      new_state.print_state
-      if new_state.total_flow_amount > best_state.total_flow_amount
-        puts "NEW BEST STATE" if PRINT_ENABLED
+    available = avail_edges
+    if available.empty?
+      best_state.total_flow_amount += best_state.total_flow_rate * remaining_time
+    else
+      available.each {|edge|
+        if @current_valve.name == "AA"
+          puts "check A" if PRINT_ENABLED
+        end
+        e = edge[:valve]
+        puts "from #{@current_valve.name} travel edge #{e.name}" if PRINT_ENABLED
+        new_map = travel_edge(edge)
+        new_state = new_map.spider
+        puts "spider state:" if PRINT_ENABLED
         new_state.print_state
-        best_state = new_state
-      end
-    }
+        if new_state.total_flow_amount > best_state.total_flow_amount
+          puts "NEW BEST STATE" if PRINT_ENABLED
+          new_state.print_state
+          best_state = new_state
+        end
+      }
+    end
+
     memoize(best_state, best_state.total_flow_amount - @total_flow_amount)
     return best_state
   end
@@ -180,6 +218,7 @@ File.open("day_16.input").each_line do |line|
   first_valve = valve if first_valve.nil?
 end
 
+map.coalesce_zero_edges
 puts map
 
 initial_state = TravelState.new(first_valve)
@@ -187,4 +226,4 @@ initial_state = TravelState.new(first_valve)
 answer = initial_state.spider
 
 puts("FINAL ANSWER hits: #{TravelState.cache_hits} misses: #{TravelState.cache_misses}")
-answer.print_state
+answer.print_state(true )
