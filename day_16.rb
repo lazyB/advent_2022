@@ -1,4 +1,4 @@
-MAX_TIME = 30
+MAX_TIME = 20
 PRINT_ENABLED = ENV['PRINT_ENABLED'] || false
 
 class Map
@@ -38,6 +38,10 @@ class Map
 
         valve.replace_edge(zero_v, other_edges)
       end
+      zero_v.edges.each do |k, v|
+        valve = v[:valve]
+        valve.edges.delete(zero_v.name)
+      end
     end
   end
 end
@@ -51,29 +55,31 @@ class Valve
   end
 
   def replace_edge(edge, new_edges)
-    deleted_edge = @edges.delete(edge.name)
-    return if deleted_edge.nil?
-
-    edge_cost = deleted_edge[:cost]
+    deleted_edge = @edges[edge.name]
+    if deleted_edge.nil?
+      puts "new edge"
+    end
+    edge_cost = 1
+    edge_cost = deleted_edge[:cost] unless deleted_edge.nil?
     new_edges.each do |k, v|
       puts k
       new_valve = v[:valve]
       new_edge_cost = v[:cost] + edge_cost
       next if !edges[k].nil? && edges[k][:cost] <= new_edge_cost
       edges[new_valve.name] = {valve: new_valve, cost: new_edge_cost}
-      new_valve.edges.delete(edge.name)
       new_valve.edges[self.name] = {valve: self, cost: new_edge_cost}
     end
   end
 end
 
-map = Map.new
+@map = Map.new
 class TravelState
   attr_accessor :current_valve, :traveled_valve, :time_elapsed, :total_flow_rate, :open_valves,
-                :total_flow_amount, :history
+                :total_flow_amount, :history, :map
 
   @@cache_hits = 0
   @@cache_misses = 0
+  @@best_route = nil
 
   def self.cache_hits
     @@cache_hits
@@ -83,7 +89,7 @@ class TravelState
     @@cache_misses
   end
 
-  def initialize(current_valve)
+  def initialize(current_valve, map)
     self.current_valve = current_valve
     @open_valves = []
     @time_elapsed = 0
@@ -91,6 +97,7 @@ class TravelState
     @history = [current_valve]
     @total_flow_amount = 0
     @total_flow_rate = 0
+    @map = map
   end
 
   def remaining_time
@@ -100,7 +107,7 @@ class TravelState
   def avail_edges
     reachable = self.current_valve.edges.values.select{|h| h[:cost] <= remaining_time }
     reachable.sort{|v1, v2| v2[:valve].flow <=> v1[:valve].flow}
-                      .sort_by{|edge| self.traveled_valve.include? edge[:valve] ? 0 : 1 }
+             .sort_by{|edge| self.traveled_valve.include? edge[:valve] ? 0 : 1 }
   end
 
   def open_valve
@@ -132,6 +139,10 @@ class TravelState
     @open_valves.map(&:name).sort.join(",")
   end
 
+  def remaining_valves
+    @map.valves.values - @open_valves
+  end
+
   def print_state(force_print = false)
     return unless PRINT_ENABLED || force_print
     puts "time: #{@time_elapsed} rate: #{@total_flow_rate} amount:#{@total_flow_amount} open:#{open_valve_names}"
@@ -143,9 +154,15 @@ class TravelState
   end
 
   def spider
+    #todo track total best case scenario, and if opening ALL the remaining valves
+    # can't beat the current best case, just bail out.
+    # best case rate = total flow + (rate + remaining valves rate) * remaining_time``
     if self.time_elapsed == MAX_TIME
       puts "REACHED END" if PRINT_ENABLED
       print_state
+      if @@best_route.nil? || self.total_flow_rate > @@best_route.total_flow_rate
+        @@best_route = self
+      end
       return self
     elsif fetch_memo(self)
       @@cache_hits += 1
@@ -164,29 +181,42 @@ class TravelState
       new_state_open.print_state
       best_state = new_state_open.spider
     end
-    available = avail_edges
-    if available.empty?
+    remaining = remaining_valves
+    if !@@best_route.nil?
+      max_flow = remaining.map(&:flow).reduce(&:+)
+      max_delta = (best_state.total_flow_rate + max_flow) * remaining_time
+      return best_state if best_state.total_flow_amount + max_delta < @@best_route.total_flow_amount
+    end
+    if remaining_valves.empty?
       best_state.total_flow_amount += best_state.total_flow_rate * remaining_time
     else
-      available.each {|edge|
-        if @current_valve.name == "AA"
-          puts "check A" if PRINT_ENABLED
-        end
-        e = edge[:valve]
-        puts "from #{@current_valve.name} travel edge #{e.name}" if PRINT_ENABLED
-        new_map = travel_edge(edge)
-        new_state = new_map.spider
-        puts "spider state:" if PRINT_ENABLED
-        new_state.print_state
-        if new_state.total_flow_amount > best_state.total_flow_amount
-          puts "NEW BEST STATE" if PRINT_ENABLED
+      available = avail_edges
+      if available.empty?
+        best_state.total_flow_amount += best_state.total_flow_rate * remaining_time
+      else
+        available.each {|edge|
+          if @current_valve.name == "AA"
+            puts "check A" if PRINT_ENABLED
+          end
+          e = edge[:valve]
+          puts "from #{@current_valve.name} travel edge #{e.name}" if PRINT_ENABLED
+          new_map = travel_edge(edge)
+          new_state = new_map.spider
+          puts "spider state:" if PRINT_ENABLED
           new_state.print_state
-          best_state = new_state
-        end
-      }
+          if new_state.total_flow_amount > best_state.total_flow_amount
+            puts "NEW BEST STATE" if PRINT_ENABLED
+            new_state.print_state
+            best_state = new_state
+          end
+        }
+      end
     end
 
     memoize(best_state, best_state.total_flow_amount - @total_flow_amount)
+    if @@best_route.nil? || self.total_flow_rate > @@best_route.total_flow_rate
+      @@best_route = self
+    end
     return best_state
   end
 
@@ -214,16 +244,18 @@ File.open("day_16.input").each_line do |line|
   flow = flow_parts.last.split('=').last.to_i
   _, _, _, _, *rest = raw_edges.split
   edges = rest.map {|raw| raw.delete (',')}
-  valve = map.add_valve(name, flow, edges)
+  valve = @map.add_valve(name, flow, edges)
   first_valve = valve if first_valve.nil?
 end
 
-map.coalesce_zero_edges
-puts map
+@map.coalesce_zero_edges
+puts @map
 
-initial_state = TravelState.new(first_valve)
+initial_state = TravelState.new(first_valve, @map)
 
 answer = initial_state.spider
+
+#todo uhhhhhhh what did I mess up here, I'm getting 702 vs 705 on the 20 step with bail outs
 
 puts("FINAL ANSWER hits: #{TravelState.cache_hits} misses: #{TravelState.cache_misses}")
 answer.print_state(true )
